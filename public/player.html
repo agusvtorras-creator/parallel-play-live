@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Play — Parallel Play Live</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+let state = { screen: 'join', error: null };
+
+function el(html) {
+  const div = document.createElement('div');
+  div.innerHTML = html.trim();
+  return div.firstElementChild;
+}
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// Prefill room code from ?code= in URL if the host page links here
+const params = new URLSearchParams(window.location.search);
+const prefillCode = params.get('code') || '';
+
+// ---------- Socket events ----------
+
+socket.on('connect', () => { render(); });
+
+socket.on('player:joinError', ({ message }) => {
+  state.error = message;
+  render();
+});
+
+socket.on('player:joined', ({ name }) => {
+  state = { screen: 'waiting', name, score: 0 };
+  render();
+});
+
+socket.on('mode:started', ({ mode }) => {
+  state.mode = mode;
+});
+
+socket.on('quiz:question', (data) => {
+  state.screen = 'quizQuestion';
+  state.q = data;
+  state.picked = null;
+  state.timeLeft = data.timeLimit;
+  render();
+  clearInterval(state.timerInterval);
+  state.timerInterval = setInterval(() => {
+    state.timeLeft = Math.max(0, state.timeLeft - 1);
+    if (state.timeLeft <= 0) clearInterval(state.timerInterval);
+    updateTimerLabel();
+  }, 1000);
+});
+
+socket.on('quiz:reveal', (data) => {
+  clearInterval(state.timerInterval);
+  state.screen = 'quizReveal';
+  state.reveal = data;
+  const mine = data.results.find(r => r.name === state.name);
+  render();
+});
+
+socket.on('quiz:final', ({ leaderboard }) => {
+  state.screen = 'final';
+  state.leaderboard = leaderboard;
+  render();
+});
+
+socket.on('team:prompt', (data) => {
+  state.screen = 'teamWriting';
+  state.prompt = data;
+  state.textValue = '';
+  render();
+});
+
+socket.on('team:vote', ({ options }) => {
+  state.screen = 'teamVoting';
+  state.voteOptions = options;
+  state.voted = false;
+  render();
+});
+
+socket.on('team:results', (data) => {
+  state.screen = 'teamResults';
+  state.results = data;
+  render();
+});
+
+socket.on('team:final', ({ leaderboard }) => {
+  state.screen = 'final';
+  state.leaderboard = leaderboard;
+  render();
+});
+
+// ---------- Actions ----------
+
+function joinRoom() {
+  const code = document.getElementById('codeInput').value;
+  const name = document.getElementById('nameInput').value;
+  state.error = null;
+  socket.emit('player:join', { code, name });
+}
+
+function pickQuizOption(i) {
+  if (state.picked !== null) return;
+  state.picked = i;
+  socket.emit('player:quizAnswer', { choice: i });
+  render();
+}
+
+function submitFix() {
+  const text = document.getElementById('fixInput').value;
+  socket.emit('player:submitFix', { text });
+  state.screen = 'waitingForOthers';
+  state.waitingLabel = 'Answer submitted — waiting for everyone else...';
+  render();
+}
+
+function castVote(targetId) {
+  if (state.voted) return;
+  state.voted = true;
+  state.votedFor = targetId;
+  socket.emit('player:vote', { targetId });
+  render();
+}
+
+// ---------- Lightweight updates ----------
+
+function updateTimerLabel() {
+  const label = document.getElementById('timeLeftLabel');
+  if (label) label.textContent = state.timeLeft + 's';
+}
+
+// ---------- Render ----------
+
+function render() {
+  const app = document.getElementById('app');
+  app.innerHTML = '';
+  app.appendChild(el(`<div class="brand"><div class="brand-badge">🎯</div><div><h1>Parallel Play</h1><div class="subtitle">${state.name ? 'Playing as ' + esc(state.name) : 'Join a game'}</div></div></div>`));
+
+  let body;
+  switch (state.screen) {
+    case 'join': body = renderJoin(); break;
+    case 'waiting': body = renderWaiting(); break;
+    case 'waitingForOthers': body = renderWaitingForOthers(); break;
+    case 'quizQuestion': body = renderQuizQuestion(); break;
+    case 'quizReveal': body = renderQuizReveal(); break;
+    case 'teamWriting': body = renderTeamWriting(); break;
+    case 'teamVoting': body = renderTeamVoting(); break;
+    case 'teamResults': body = renderTeamResults(); break;
+    case 'final': body = renderFinal(); break;
+    default: body = renderJoin();
+  }
+  app.appendChild(body);
+}
+
+function renderJoin() {
+  const card = el('<div class="card"></div>');
+  card.appendChild(el('<p class="subtitle" style="margin-bottom:16px;">Enter the room code from the host screen</p>'));
+  const codeInput = el(`<input type="text" id="codeInput" placeholder="ROOM CODE" maxlength="4" style="text-transform:uppercase; font-size:28px; text-align:center; letter-spacing:4px; margin-bottom:12px;" value="${esc(prefillCode)}">`);
+  card.appendChild(codeInput);
+  const nameInput = el('<input type="text" id="nameInput" placeholder="Your name" maxlength="20" style="margin-bottom:16px;">');
+  card.appendChild(nameInput);
+  const btn = el('<button class="btn-primary btn-block">Join game</button>');
+  btn.onclick = joinRoom;
+  card.appendChild(btn);
+  if (state.error) card.appendChild(el(`<div class="error-msg">${esc(state.error)}</div>`));
+  return card;
+}
+
+function renderWaiting() {
+  const card = el('<div class="card center"></div>');
+  card.appendChild(el(`<p style="font-size:20px;">You're in, ${esc(state.name)}! 🎉</p>`));
+  card.appendChild(el('<div class="waiting">Waiting for the host to start...</div>'));
+  return card;
+}
+
+function renderWaitingForOthers() {
+  const card = el('<div class="card center"></div>');
+  card.appendChild(el(`<div class="waiting">${esc(state.waitingLabel || 'Waiting...')}</div>`));
+  return card;
+}
+
+function renderQuizQuestion() {
+  const q = state.q;
+  const wrap = el('<div></div>');
+  const stats = el('<div class="stat-row"></div>');
+  stats.appendChild(el(`<div class="stat"><span>Question</span>${q.index + 1} / ${q.total}</div>`));
+  stats.appendChild(el(`<div class="stat" id="timeLeftLabel">${state.timeLeft}s</div>`));
+  wrap.appendChild(stats);
+
+  const card = el('<div class="card"></div>');
+  card.appendChild(el(`<p class="question-text">${esc(q.q)}</p>`));
+  const opts = el('<div class="options"></div>');
+  q.options.forEach((opt, i) => {
+    const btn = el(`<button class="option-btn">${esc(opt)}</button>`);
+    if (state.picked !== null) {
+      btn.disabled = true;
+      if (i === state.picked) btn.classList.add('picked');
+    }
+    btn.onclick = () => pickQuizOption(i);
+    opts.appendChild(btn);
+  });
+  card.appendChild(opts);
+  if (state.picked !== null) {
+    card.appendChild(el('<div class="waiting" style="padding-top:20px;">Locked in! Waiting for results...</div>'));
+  }
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function renderQuizReveal() {
+  const r = state.reveal;
+  const mine = r.results.find(p => p.name === state.name);
+  const wrap = el('<div></div>');
+  const card = el('<div class="card center"></div>');
+  if (mine) {
+    card.appendChild(el(`<h2 style="font-size:28px;">${mine.correct ? '✅ Correct!' : (mine.answered ? '❌ Not quite' : '⏱️ No answer')}</h2>`));
+    if (mine.points > 0) card.appendChild(el(`<p style="font-size:18px; color:var(--good);">+${mine.points} points</p>`));
+    card.appendChild(el(`<p class="subtitle">Total score: ${mine.total}</p>`));
+  }
+  card.appendChild(el(`<div class="explanation" style="text-align:left;">${esc(r.explain)}</div>`));
+  card.appendChild(el('<div class="waiting" style="padding-top:16px;">Waiting for the host to continue...</div>'));
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function renderTeamWriting() {
+  const p = state.prompt;
+  const wrap = el('<div></div>');
+  const stats = el('<div class="stat-row"></div>');
+  stats.appendChild(el(`<div class="stat"><span>Round</span>${p.round + 1} / ${p.total}</div>`));
+  wrap.appendChild(stats);
+
+  const card = el('<div class="card"></div>');
+  card.appendChild(el('<h3 style="font-size:18px;">Fix this sentence</h3>'));
+  card.appendChild(el(`<div class="broken-sentence">"${esc(p.broken)}"</div>`));
+  const textarea = el('<textarea id="fixInput" placeholder="Type your corrected sentence..."></textarea>');
+  card.appendChild(textarea);
+  const btn = el('<button class="btn-primary btn-block" style="margin-top:16px;">Submit</button>');
+  btn.onclick = submitFix;
+  card.appendChild(btn);
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function renderTeamVoting() {
+  const wrap = el('<div></div>');
+  const card = el('<div class="card"></div>');
+  card.appendChild(el('<h3 style="font-size:18px; margin-bottom:16px;">Vote for the best fix</h3>'));
+  if (!state.voteOptions.length) {
+    card.appendChild(el('<div class="waiting">No other answers to vote on this round.</div>'));
+  }
+  state.voteOptions.forEach(opt => {
+    const btn = el(`<button class="vote-card ${state.votedFor === opt.id ? 'picked' : ''}">${esc(opt.text)}</button>`);
+    if (state.voted) btn.disabled = true;
+    btn.onclick = () => castVote(opt.id);
+    card.appendChild(btn);
+  });
+  if (state.voted) card.appendChild(el('<div class="waiting" style="padding-top:16px;">Vote locked in — waiting for everyone else...</div>'));
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function renderTeamResults() {
+  const r = state.results;
+  const wrap = el('<div></div>');
+  const card = el('<div class="card"></div>');
+  card.appendChild(el('<h3 style="font-size:18px;">Results</h3>'));
+  const mine = r.results.find(p => p.name === state.name);
+  if (mine) {
+    card.appendChild(el(`<p style="color:var(--good); font-weight:600;">${mine.votes > 0 ? `Your answer got ${mine.votes} vote${mine.votes === 1 ? '' : 's'}! +${mine.votes} points` : 'No votes this round'}</p>`));
+  }
+  card.appendChild(el(`<div class="explanation"><b>Model fix:</b> ${esc(r.fix)}<br><br><b>Focus:</b> ${esc(r.focus)}</div>`));
+  card.appendChild(el('<div class="waiting" style="padding-top:16px;">Waiting for the host to continue...</div>'));
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function renderFinal() {
+  const wrap = el('<div></div>');
+  const card = el('<div class="card center"></div>');
+  const mine = state.leaderboard.find(p => p.name === state.name);
+  const rank = state.leaderboard.findIndex(p => p.name === state.name) + 1;
+  card.appendChild(el('<h2 style="font-size:28px;">🏁 Game over!</h2>'));
+  if (mine) {
+    card.appendChild(el(`<p style="font-size:20px; margin-top:12px;">You finished #${rank} with ${mine.score} points</p>`));
+  }
+  wrap.appendChild(card);
+  return wrap;
+}
+
+render();
+</script>
+</body>
+</html>

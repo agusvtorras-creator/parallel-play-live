@@ -1,0 +1,16 @@
+{
+  "name": "parallel-play-live",
+  "version": "1.0.0",
+  "description": "Real-time classroom game for practicing English parallelism, with a projected host screen and phone join codes.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}

@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Host — Parallel Play Live</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+let state = { screen: 'landing' };
+let quizTimerInterval = null;
+
+function el(html) {
+  const div = document.createElement('div');
+  div.innerHTML = html.trim();
+  return div.firstElementChild;
+}
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ---------- Socket events ----------
+
+socket.on('connect', () => {
+  render();
+});
+
+socket.on('host:created', ({ code }) => {
+  state = { screen: 'lobby', code, players: [] };
+  render();
+});
+
+socket.on('room:update', ({ players }) => {
+  if (state.players !== undefined) state.players = players;
+  if (state.leaderboardPreview !== undefined) state.leaderboardPreview = players;
+  render();
+});
+
+socket.on('mode:started', ({ mode, total }) => {
+  state.mode = mode;
+  state.total = total;
+});
+
+socket.on('quiz:question', (data) => {
+  clearInterval(quizTimerInterval);
+  state.screen = 'quizQuestion';
+  state.q = data;
+  state.answeredCount = 0;
+  state.playerTotal = state.players.length;
+  state.timeLeft = data.timeLimit;
+  render();
+  quizTimerInterval = setInterval(() => {
+    state.timeLeft = Math.max(0, state.timeLeft - 1);
+    updateTimerBar();
+    if (state.timeLeft <= 0) clearInterval(quizTimerInterval);
+  }, 1000);
+});
+
+socket.on('quiz:answerCount', ({ count, total }) => {
+  state.answeredCount = count;
+  state.playerTotal = total;
+  updateAnsweredStat();
+});
+
+socket.on('quiz:reveal', (data) => {
+  clearInterval(quizTimerInterval);
+  state.screen = 'quizReveal';
+  state.reveal = data;
+  render();
+});
+
+socket.on('quiz:final', ({ leaderboard }) => {
+  state.screen = 'final';
+  state.leaderboard = leaderboard;
+  render();
+});
+
+socket.on('team:prompt', (data) => {
+  state.screen = 'teamWriting';
+  state.prompt = data;
+  state.submitCount = 0;
+  state.playerTotal = state.players.length;
+  render();
+});
+
+socket.on('team:submitCount', ({ count, total }) => {
+  state.submitCount = count;
+  state.playerTotal = total;
+  updateAnsweredStat();
+});
+
+socket.on('team:votingStarted', ({ count }) => {
+  state.screen = 'teamVoting';
+  state.answerCount = count;
+  state.voteCount = 0;
+  state.playerTotal = state.players.length;
+  render();
+});
+
+socket.on('team:voteCount', ({ count, total }) => {
+  state.voteCount = count;
+  state.playerTotal = total;
+  updateAnsweredStat();
+});
+
+socket.on('team:results', (data) => {
+  state.screen = 'teamResults';
+  state.results = data;
+  render();
+});
+
+socket.on('team:final', ({ leaderboard }) => {
+  state.screen = 'final';
+  state.leaderboard = leaderboard;
+  render();
+});
+
+// ---------- Actions ----------
+
+function createGame() { socket.emit('host:create'); }
+function startMode(mode) { socket.emit('host:startMode', { mode }); }
+function nextRound() { socket.emit('host:next'); }
+function forceAdvance() { socket.emit('host:forceAdvance'); }
+function backToLanding() { window.location.reload(); }
+
+// ---------- Lightweight DOM updates (avoid full re-render flicker) ----------
+
+function updateTimerBar() {
+  const bar = document.getElementById('timerFill');
+  if (bar && state.q) bar.style.width = (state.timeLeft / state.q.timeLimit * 100) + '%';
+  const label = document.getElementById('timerLabel');
+  if (label) label.textContent = state.timeLeft + 's';
+}
+function updateAnsweredStat() {
+  const stat = document.getElementById('answeredStat');
+  if (stat) {
+    const n = state.answeredCount !== undefined ? state.answeredCount : (state.submitCount !== undefined ? state.submitCount : state.voteCount);
+    stat.textContent = n + ' / ' + state.playerTotal;
+  }
+}
+
+// ---------- Render ----------
+
+function render() {
+  const app = document.getElementById('app');
+  app.innerHTML = '';
+  app.appendChild(el(`<div class="brand"><div class="brand-badge">🎯</div><div><h1>Parallel Play Live</h1><div class="subtitle">Host screen — project this</div></div></div>`));
+
+  let body;
+  switch (state.screen) {
+    case 'landing': body = renderLanding(); break;
+    case 'lobby': body = renderLobby(); break;
+    case 'quizQuestion': body = renderQuizQuestion(); break;
+    case 'quizReveal': body = renderQuizReveal(); break;
+    case 'teamWriting': body = renderTeamWriting(); break;
+    case 'teamVoting': body = renderTeamVoting(); break;
+    case 'teamResults': body = renderTeamResults(); break;
+    case 'final': body = renderFinal(); break;
+    default: body = renderLanding();
+  }
+  app.appendChild(body);
+}
+
+function renderLanding() {
+  const card = el('<div class="card center"></div>');
+  card.appendChild(el('<p style="font-size:18px; color:var(--ink-soft); margin-bottom:20px;">Create a game and share the room code with your class.</p>'));
+  const btn = el('<button class="btn-primary btn-block">Create game</button>');
+  btn.onclick = createGame;
+  card.appendChild(btn);
+  return card;
+}
+
+function renderLobby() {
+  const wrap = el('<div></div>');
+  const card = el('<div class="card center"></div>');
+  card.appendChild(el('<p class="subtitle">Room code</p>'));
+  card.appendChild(el(`<div class="code-display">${state.code}</div>`));
+  card.appendChild(el(`<div class="join-url">Players go to <b>${esc(window.location.origin)}/player.html</b> and enter this code</div>`));
+
+  const list = el('<div class="player-list"></div>');
+  if (!state.players.length) {
+    list.appendChild(el('<div class="waiting" style="padding:12px 0;">Waiting for players to join...</div>'));
+  } else {
+    state.players.forEach(p => list.appendChild(el(`<div class="player-chip">${esc(p.name)}</div>`)));
+  }
+  card.appendChild(list);
+
+  card.appendChild(el(`<p class="subtitle" style="margin-top:16px;">${state.players.length} player${state.players.length === 1 ? '' : 's'} joined</p>`));
+
+  const modeGrid = el('<div class="mode-grid" style="margin-top:24px;"></div>');
+  const quizCard = el('<div class="mode-card"><h3>⚡ Speed Quiz</h3><p>Timed multiple choice. Fast + correct wins.</p></div>');
+  quizCard.onclick = () => startMode('quiz');
+  const teamCard = el('<div class="mode-card"><h3>✍️ Write &amp; Vote</h3><p>Everyone fixes a sentence, then votes on the best fix.</p></div>');
+  teamCard.onclick = () => startMode('team');
+  modeGrid.appendChild(quizCard);
+  modeGrid.appendChild(teamCard);
+  card.appendChild(modeGrid);
+
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function renderQuizQuestion() {
+  const q = state.q;
+  const wrap = el('<div></div>');
+  const pct = (q.index / q.total) * 100;
+  wrap.appendChild(el(`<div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>`));
+
+  const stats = el('<div class="stat-row"></div>');
+  stats.appendChild(el(`<div class="stat"><span>Question</span>${q.index + 1} / ${q.total}</div>`));
+  stats.appendChild(el(`<div class="stat"><span>Answered</span><span id="answeredStat">0 / ${state.playerTotal}</span></div>`));
+  stats.appendChild(el(`<div class="stat" id="timerLabel">${q.timeLimit}s</div>`));
+  wrap.appendChild(stats);
+
+  wrap.appendChild(el(`<div class="progress-bar"><div id="timerFill" class="progress-fill timer-fill" style="width:100%"></div></div>`));
+
+  const card = el('<div class="card"></div>');
+  card.appendChild(el(`<p class="question-text">${esc(q.q)}</p>`));
+  const opts = el('<div class="options"></div>');
+  q.options.forEach(opt => opts.appendChild(el(`<div class="option-btn" style="cursor:default;">${esc(opt)}</div>`)));
+  card.appendChild(opts);
+  wrap.appendChild(card);
+
+  const skipBtn = el('<button class="btn-ghost btn-block" style="margin-top:16px;">Reveal now (skip timer)</button>');
+  skipBtn.onclick = forceAdvance;
+  wrap.appendChild(skipBtn);
+  return wrap;
+}
+
+function renderQuizReveal() {
+  const r = state.reveal;
+  const wrap = el('<div></div>');
+  const card = el('<div class="card"></div>');
+  card.appendChild(el(`<p class="question-text">${esc(state.q.q)}</p>`));
+  const opts = el('<div class="options"></div>');
+  state.q.options.forEach((opt, i) => {
+    const btn = el(`<div class="option-btn">${esc(opt)}</div>`);
+    if (i === r.correctIndex) btn.classList.add('correct');
+    opts.appendChild(btn);
+  });
+  card.appendChild(opts);
+  card.appendChild(el(`<div class="explanation">${esc(r.explain)}</div>`));
+
+  card.appendChild(el('<h3 style="margin-top:24px; font-size:18px;">Leaderboard</h3>'));
+  const board = el('<div style="margin-top:12px;"></div>');
+  r.results.slice(0, 8).forEach((p, i) => {
+    board.appendChild(el(`<div class="leaderboard-row ${i === 0 ? 'first' : ''}"><span>${esc(p.name)}${p.correct ? ' ✅' : ''}</span><span>${p.total}</span></div>`));
+  });
+  card.appendChild(board);
+
+  const nextBtn = el(`<button class="btn-primary btn-block" style="margin-top:20px;">${state.q.index + 1 >= state.q.total ? 'See final scores' : 'Next question →'}</button>`);
+  nextBtn.onclick = nextRound;
+  card.appendChild(nextBtn);
+
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function renderTeamWriting() {
+  const p = state.prompt;
+  const wrap = el('<div></div>');
+  const pct = (p.round / p.total) * 100;
+  wrap.appendChild(el(`<div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>`));
+
+  const stats = el('<div class="stat-row"></div>');
+  stats.appendChild(el(`<div class="stat"><span>Round</span>${p.round + 1} / ${p.total}</div>`));
+  stats.appendChild(el(`<div class="stat"><span>Submitted</span><span id="answeredStat">0 / ${state.playerTotal}</span></div>`));
+  wrap.appendChild(stats);
+
+  const card = el('<div class="card"></div>');
+  card.appendChild(el('<h3 style="font-size:18px;">Fix this sentence — everyone writes on their phone</h3>'));
+  card.appendChild(el(`<div class="broken-sentence">"${esc(p.broken)}"</div>`));
+  wrap.appendChild(card);
+
+  const skipBtn = el('<button class="btn-ghost btn-block" style="margin-top:16px;">Move to voting now</button>');
+  skipBtn.onclick = forceAdvance;
+  wrap.appendChild(skipBtn);
+  return wrap;
+}
+
+function renderTeamVoting() {
+  const wrap = el('<div></div>');
+  const stats = el('<div class="stat-row"></div>');
+  stats.appendChild(el(`<div class="stat"><span>Answers in</span>${state.answerCount}</div>`));
+  stats.appendChild(el(`<div class="stat"><span>Voted</span><span id="answeredStat">0 / ${state.playerTotal}</span></div>`));
+  wrap.appendChild(stats);
+
+  const card = el('<div class="card center"></div>');
+  card.appendChild(el('<h3 style="font-size:20px;">Vote time!</h3>'));
+  card.appendChild(el('<p class="subtitle" style="margin-top:8px;">Everyone is voting for the best fix on their phone right now.</p>'));
+  wrap.appendChild(card);
+
+  const skipBtn = el('<button class="btn-ghost btn-block" style="margin-top:16px;">Show results now</button>');
+  skipBtn.onclick = forceAdvance;
+  wrap.appendChild(skipBtn);
+  return wrap;
+}
+
+function renderTeamResults() {
+  const r = state.results;
+  const wrap = el('<div></div>');
+  const card = el('<div class="card"></div>');
+  card.appendChild(el('<h3 style="font-size:20px;">Results</h3>'));
+  r.results.forEach((ans, i) => {
+    const c = el(`<div class="vote-card ${i === 0 && ans.votes > 0 ? 'picked' : ''}">${esc(ans.text)}</div>`);
+    c.appendChild(el(`<div class="who">— ${esc(ans.name)}</div>`));
+    c.appendChild(el(`<div class="votes">${ans.votes} vote${ans.votes === 1 ? '' : 's'}${i === 0 && ans.votes > 0 ? ' 🏆' : ''}</div>`));
+    card.appendChild(c);
+  });
+  card.appendChild(el(`<div class="explanation"><b>Model fix:</b> ${esc(r.fix)}<br><br><b>Focus:</b> ${esc(r.focus)}</div>`));
+
+  card.appendChild(el('<h3 style="margin-top:24px; font-size:18px;">Leaderboard</h3>'));
+  const board = el('<div style="margin-top:12px;"></div>');
+  r.leaderboard.slice(0, 8).forEach((p, i) => {
+    board.appendChild(el(`<div class="leaderboard-row ${i === 0 ? 'first' : ''}"><span>${esc(p.name)}</span><span>${p.score}</span></div>`));
+  });
+  card.appendChild(board);
+
+  const nextBtn = el('<button class="btn-primary btn-block" style="margin-top:20px;">Next round →</button>');
+  nextBtn.onclick = nextRound;
+  card.appendChild(nextBtn);
+
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function renderFinal() {
+  const wrap = el('<div></div>');
+  const card = el('<div class="card center"></div>');
+  card.appendChild(el('<h2 style="font-size:30px;">🏆 Final Scores</h2>'));
+  const medals = ['🥇', '🥈', '🥉'];
+  const board = el('<div style="margin-top:20px; text-align:left;"></div>');
+  state.leaderboard.forEach((p, i) => {
+    board.appendChild(el(`<div class="leaderboard-row ${i === 0 ? 'first' : ''}"><span><span class="medal">${medals[i] || '　'}</span>${esc(p.name)}</span><span>${p.score}</span></div>`));
+  });
+  card.appendChild(board);
+  const newGameBtn = el('<button class="btn-primary btn-block" style="margin-top:20px;">New game</button>');
+  newGameBtn.onclick = backToLanding;
+  card.appendChild(newGameBtn);
+  wrap.appendChild(card);
+  return wrap;
+}
+
+render();
+</script>
+</body>
+</html>
