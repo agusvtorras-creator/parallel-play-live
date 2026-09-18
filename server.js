@@ -14,7 +14,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
 
-const QUIZ_TIME_LIMIT = 20; // seconds per question
+const QUIZ_TIME_LIMIT = 30; // seconds per question
 
 // ---------------------------------------------------------------------------
 // Content — edit these arrays to change what students practice.
